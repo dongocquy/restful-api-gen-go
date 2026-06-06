@@ -21,7 +21,7 @@ func main() {
 	serve := flag.Bool("serve", false, "Generate main.go + build + run server after generation")
 	port := flag.String("port", "8080", "Server port (serve mode)")
 	packageName := flag.String("package", "api", "Go package name")
-	modulePath := flag.String("module", "github.com/yourorg/api-server", "Go module path")
+	modulePath := flag.String("module", "api-server", "Go module path")
 	apiVersion := flag.String("api-version", "v1", "API version prefix")
 	framework := flag.String("framework", "gin", "Web framework: gin, chi, echo, fiber")
 
@@ -147,11 +147,11 @@ func generateAndRun(project *schema.ProjectConfig, jsonPath, outputDir, port str
 	fmt.Println()
 
 	// Run the server
-	serverPath := filepath.Join(outputDir, "server")
-	serverCmd := exec.Command(serverPath)
+	absServerPath, _ := filepath.Abs(filepath.Join(outputDir, "server"))
+	serverCmd := exec.Command(absServerPath)
 	serverCmd.Stdout = os.Stdout
 	serverCmd.Stderr = os.Stderr
-	serverCmd.Dir = pkgDir
+	serverCmd.Dir = filepath.Dir(absServerPath)
 
 	// Forward interrupt signals
 	serverCmd.Stdin = os.Stdin

@@ -2,6 +2,7 @@ package generator
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,7 +170,7 @@ func buildConnStr(db schema.DBConfig) string {
 		port = 1433
 	}
 	dbName := db.Database
-	return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=disable", user, pass, host, port, dbName)
+	return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=disable", user, url.QueryEscape(pass), host, port, dbName)
 }
 
 // --- Model (template-based) ---
@@ -259,13 +260,22 @@ import (
 `, cfg.PackageName, cfg.PackageName))
 
 	for _, t := range cfg.Tables {
+		// pkBaseType strips pointer prefix — PK params are never nil
+		pkBaseType := func(goType string) string {
+			return strings.TrimPrefix(goType, "*")
+		}
 		pkName := t.PrimaryKey
 		pkType := "int64"
 		for _, c := range t.Columns {
 			if c.IsPrimaryKey {
-				pkType = c.GoType
+				pkType = pkBaseType(c.GoType)
 				break
 			}
+		}
+		// If no PK, use first column as fallback
+		if pkName == "" && len(t.Columns) > 0 {
+			pkName = t.Columns[0].Name
+			pkType = pkBaseType(t.Columns[0].GoType)
 		}
 
 		b.WriteString(fmt.Sprintf(`// %sRepository handles database operations for %s
@@ -287,7 +297,7 @@ func (r *%sRepository) GetAll(ctx context.Context, page, pageSize int) ([]%s, in
 		return nil, 0, fmt.Errorf("count %%s: %%w", "%s", err)
 	}
 	offset := (page - 1) * pageSize
-	rows, err := r.db.QueryxContext(ctx, "SELECT * FROM %s ORDER BY %s OFFSET ? ROWS FETCH NEXT ? ROWS ONLY", offset, pageSize)
+	rows, err := r.db.QueryxContext(ctx, "SELECT * FROM %s ORDER BY %s OFFSET @p1 ROWS FETCH NEXT @p2 ROWS ONLY", offset, pageSize)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select %%s: %%w", "%s", err)
 	}
@@ -313,7 +323,7 @@ func (r *%sRepository) GetAll(ctx context.Context, page, pageSize int) ([]%s, in
 		b.WriteString(fmt.Sprintf(`// GetByID retrieves a single %s by %s
 func (r *%sRepository) GetByID(ctx context.Context, id %s) (*%s, error) {
 	var item %s
-	if err := r.db.GetContext(ctx, &item, "SELECT * FROM %s WHERE %s = ?", id); err != nil {
+	if err := r.db.GetContext(ctx, &item, "SELECT * FROM %s WHERE %s = @p1", id); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -339,7 +349,7 @@ func (r *%sRepository) Create(ctx context.Context, item *%s) error {
 	query := fmt.Sprintf("INSERT INTO %%s (%%s) VALUES (%%s)", "%s", cols, vals)
 `, t.Alias, t.Alias, t.Alias, t.Name))
 
-		if autoInc {
+		if autoInc && pkName != "" {
 			b.WriteString(fmt.Sprintf(`	if err := r.db.QueryRowContext(ctx, query+"; SELECT CAST(SCOPE_IDENTITY() AS BIGINT)", args...).Scan(&item.%s); err != nil {
 		return fmt.Errorf("insert %%s: %%w", "%s", err)
 	}
@@ -363,7 +373,7 @@ func (r *%sRepository) Create(ctx context.Context, item *%s) error {
 func (r *%sRepository) Update(ctx context.Context, id %s, item *%s) error {
 	sets, args := extractUpdateFields(item)
 	args = append(args, id)
-	query := fmt.Sprintf("UPDATE %%s SET %%s WHERE %s = ?", "%s", sets)
+	query := fmt.Sprintf("UPDATE %%s SET %%s WHERE %s = @p1", "%s", sets)
 	result, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("update %%s: %%w", "%s", err)
@@ -383,15 +393,24 @@ func (r *%sRepository) Delete(ctx context.Context, id %s) error {
 `, t.Alias, t.Alias, pkType))
 
 		if t.SoftDelete {
-			b.WriteString(fmt.Sprintf(`	if _, err := r.db.ExecContext(ctx, "UPDATE %s SET deleted_at = GETDATE() WHERE %s = ?", id); err != nil {
+						b.WriteString(fmt.Sprintf(`	if _, err := r.db.ExecContext(ctx, "UPDATE %s SET deleted_at = GETDATE() WHERE %s = @p1", id); err != nil {
 		return fmt.Errorf("soft-delete %%s: %%w", "%s", err)
 	}
 	return nil
 }
 
-`, t.Name, pkName, t.Name))
+// Restore undeletes a soft-deleted %s record
+func (r *%sRepository) Restore(ctx context.Context, id %s) error {
+	_, err := r.db.ExecContext(ctx, "UPDATE %s SET deleted_at = NULL WHERE %s = @p1", id)
+	if err != nil {
+		return fmt.Errorf("restore %%s: %%w", "%s", err)
+	}
+	return nil
+}
+
+`, t.Name, pkName, t.Name, t.Alias, t.Alias, pkType, t.Name, pkName, t.Name))
 		} else {
-			b.WriteString(fmt.Sprintf(`	result, err := r.db.ExecContext(ctx, "DELETE FROM %s WHERE %s = ?", id)
+			b.WriteString(fmt.Sprintf(`	result, err := r.db.ExecContext(ctx, "DELETE FROM %s WHERE %s = @p1", id)
 	if err != nil {
 		return fmt.Errorf("delete %%s: %%w", "%s", err)
 	}
@@ -428,7 +447,7 @@ func extractInsertFields(item interface{}) (string, string, []interface{}) {
 			continue
 		}
 		cols = append(cols, dbTag)
-		placeholders = append(placeholders, "?")
+		placeholders = append(placeholders, fmt.Sprintf("@p%d", len(placeholders)+1))
 		args = append(args, val.Interface())
 	}
 	return strings.Join(cols, ", "), strings.Join(placeholders, ", "), args
@@ -450,7 +469,7 @@ func extractUpdateFields(item interface{}) (string, []interface{}) {
 		if !val.IsValid() {
 			continue
 		}
-		sets = append(sets, dbTag+" = ?")
+		sets = append(sets, fmt.Sprintf("%s = @p%d", dbTag, len(args)+1))
 		args = append(args, val.Interface())
 	}
 	return strings.Join(sets, ", "), args
@@ -478,12 +497,23 @@ import (
 `, cfg.PackageName, cfg.PackageName))
 
 	for _, t := range cfg.Tables {
+		// pkBaseType strips pointer prefix — PK params are never nil
+		pkBaseType := func(goType string) string {
+			return strings.TrimPrefix(goType, "*")
+		}
 		pkType := "int64"
+		pkName := ""
 		for _, c := range t.Columns {
 			if c.IsPrimaryKey {
-				pkType = c.GoType
+				pkType = pkBaseType(c.GoType)
+				pkName = c.Name
 				break
 			}
+		}
+		// If no PK, use first column as fallback
+		if pkName == "" && len(t.Columns) > 0 {
+			pkName = t.Columns[0].Name
+			pkType = pkBaseType(t.Columns[0].GoType)
 		}
 
 		b.WriteString(fmt.Sprintf(`// %sService handles business logic for %s
@@ -542,17 +572,27 @@ type PaginatedResult struct {
 
 		// Create
 		b.WriteString(fmt.Sprintf(`func (s *%sService) Create(ctx context.Context, item *%s) error {
-	now := time.Now()
 `, t.Alias, t.Alias))
+		
+		// Check if table has timestamp columns
+		hasCreatedAt := false
+		hasUpdatedAt := false
 		for _, c := range t.Columns {
-			if c.Name == "created_at" {
+			if c.Name == "created_at" && (c.GoType == "time.Time" || c.GoType == "*time.Time") { hasCreatedAt = true }
+			if c.Name == "updated_at" && (c.GoType == "time.Time" || c.GoType == "*time.Time") { hasUpdatedAt = true }
+		}
+		if hasCreatedAt || hasUpdatedAt {
+			b.WriteString("	now := time.Now()\n")
+		}
+		for _, c := range t.Columns {
+			if c.Name == "created_at" && (c.GoType == "time.Time" || c.GoType == "*time.Time") {
 				if c.GoType == "*time.Time" {
 					b.WriteString("	item.CreatedAt = &now\n")
 				} else {
 					b.WriteString("	item.CreatedAt = now\n")
 				}
 			}
-			if c.Name == "updated_at" {
+			if c.Name == "updated_at" && (c.GoType == "time.Time" || c.GoType == "*time.Time") {
 				if c.GoType == "*time.Time" {
 					b.WriteString("	item.UpdatedAt = &now\n")
 				} else {
@@ -570,10 +610,18 @@ type PaginatedResult struct {
 
 		// Update
 		b.WriteString(fmt.Sprintf(`func (s *%sService) Update(ctx context.Context, id %s, item *%s) error {
-	now := time.Now()
 `, t.Alias, pkType, t.Alias))
+		
+		// Check if table has updated_at column
+		hasUpdatedAt = false
 		for _, c := range t.Columns {
-			if c.Name == "updated_at" {
+			if c.Name == "updated_at" && (c.GoType == "time.Time" || c.GoType == "*time.Time") { hasUpdatedAt = true }
+		}
+		if hasUpdatedAt {
+			b.WriteString("	now := time.Now()\n")
+		}
+		for _, c := range t.Columns {
+			if c.Name == "updated_at" && (c.GoType == "time.Time" || c.GoType == "*time.Time") {
 				if c.GoType == "*time.Time" {
 					b.WriteString("	item.UpdatedAt = &now\n")
 				} else {
@@ -633,6 +681,29 @@ import (
 `, cfg.PackageName, cfg.PackageName))
 
 	for _, t := range cfg.Tables {
+		// pkBaseType strips pointer prefix — PK params are never nil
+		pkBaseType := func(goType string) string {
+			return strings.TrimPrefix(goType, "*")
+		}
+		// Determine pkType (same fallback as repository)
+		pkType := "int64"
+		pkName := ""
+		for _, c := range t.Columns {
+			if c.IsPrimaryKey {
+				pkType = pkBaseType(c.GoType)
+				pkName = c.Name
+				break
+			}
+		}
+		if pkName == "" && len(t.Columns) > 0 {
+			pkName = t.Columns[0].Name
+			pkType = pkBaseType(t.Columns[0].GoType)
+		}
+
+		isIntPK := pkType == "int" || pkType == "int64" || pkType == "int16" || pkType == "int8" || pkType == "*int" || pkType == "*int64"
+		isExactInt64 := pkType == "int64" || pkType == "*int64"
+		isExactInt := pkType == "int" || pkType == "*int"
+
 		b.WriteString(fmt.Sprintf(`// %sHandler handles HTTP requests for %s
 type %sHandler struct {
 	service *%sService
@@ -660,14 +731,37 @@ func (h *%sHandler) List%s(c *gin.Context) {
 `, t.Alias, cfg.APIVersion, t.Name, t.Alias, t.Alias))
 
 		// GetByID
-		b.WriteString(fmt.Sprintf(`// Get%s handles GET /api/%s/%s/:id
-func (h *%sHandler) Get%s(c *gin.Context) {
-	idStr := c.Param("id")
+		var getIdConv string
+		if isIntPK {
+			if isExactInt64 {
+				getIdConv = `idStr := c.Param("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
-	}
+	}`
+			} else if isExactInt {
+				getIdConv = `idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}`
+			} else {
+				getIdConv = `idStr := c.Param("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}`
+			}
+		} else {
+			getIdConv = `id := c.Param("id")`
+		}
+
+		b.WriteString(fmt.Sprintf(`// Get%s handles GET /api/%s/%s/:id
+func (h *%sHandler) Get%s(c *gin.Context) {
+	%s
 	item, err := h.service.GetByID(c.Request.Context(), id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
@@ -676,7 +770,7 @@ func (h *%sHandler) Get%s(c *gin.Context) {
 	c.JSON(http.StatusOK, item)
 }
 
-`, t.Alias, cfg.APIVersion, t.Name, t.Alias, t.Alias))
+`, t.Alias, cfg.APIVersion, t.Name, t.Alias, t.Alias, getIdConv))
 
 		// Create
 		b.WriteString(fmt.Sprintf(`// Create%s handles POST /api/%s/%s
@@ -696,14 +790,37 @@ func (h *%sHandler) Create%s(c *gin.Context) {
 `, t.Alias, cfg.APIVersion, t.Name, t.Alias, t.Alias, t.Alias))
 
 		// Update
-		b.WriteString(fmt.Sprintf(`// Update%s handles PUT /api/%s/%s/:id
-func (h *%sHandler) Update%s(c *gin.Context) {
-	idStr := c.Param("id")
+		var updIdConv string
+		if isIntPK {
+			if isExactInt64 {
+				updIdConv = `idStr := c.Param("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
-	}
+	}`
+			} else if isExactInt {
+				updIdConv = `idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}`
+			} else {
+				updIdConv = `idStr := c.Param("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}`
+			}
+		} else {
+			updIdConv = `id := c.Param("id")`
+		}
+
+		b.WriteString(fmt.Sprintf(`// Update%s handles PUT /api/%s/%s/:id
+func (h *%sHandler) Update%s(c *gin.Context) {
+	%s
 	var item %s
 	if err := c.ShouldBindJSON(&item); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -716,17 +833,40 @@ func (h *%sHandler) Update%s(c *gin.Context) {
 	c.JSON(http.StatusOK, item)
 }
 
-`, t.Alias, cfg.APIVersion, t.Name, t.Alias, t.Alias, t.Alias))
+`, t.Alias, cfg.APIVersion, t.Name, t.Alias, t.Alias, updIdConv, t.Alias))
 
 		// Delete
-		b.WriteString(fmt.Sprintf(`// Delete%s handles DELETE /api/%s/%s/:id
-func (h *%sHandler) Delete%s(c *gin.Context) {
-	idStr := c.Param("id")
+		var delIdConv string
+		if isIntPK {
+			if isExactInt64 {
+				delIdConv = `idStr := c.Param("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
-	}
+	}`
+			} else if isExactInt {
+				delIdConv = `idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}`
+			} else {
+				delIdConv = `idStr := c.Param("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}`
+			}
+		} else {
+			delIdConv = `id := c.Param("id")`
+		}
+
+		b.WriteString(fmt.Sprintf(`// Delete%s handles DELETE /api/%s/%s/:id
+func (h *%sHandler) Delete%s(c *gin.Context) {
+	%s
 	if err := h.service.Delete(c.Request.Context(), id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -734,9 +874,9 @@ func (h *%sHandler) Delete%s(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-`, t.Alias, cfg.APIVersion, t.Name, t.Alias, t.Alias))
-	}
+`, t.Alias, cfg.APIVersion, t.Name, t.Alias, t.Alias, delIdConv))
 
+	}
 	return writeGoFile(pkgDir, "handler.go", b.String())
 }
 
@@ -779,12 +919,12 @@ func SetupRoutes(router *gin.Engine, db *sqlx.DB) {
 			lname, t.Alias,
 			lname, t.Alias, lname,
 			lname, t.Alias, lname,
-			t.Name, t.Name,
-			t.Name, lname, t.Alias,
-			t.Name, lname, t.Alias,
-			t.Name, lname, t.Alias,
-			t.Name, lname, t.Alias,
-			t.Name, lname, t.Alias))
+			lname, t.Name,
+			lname, lname, t.Alias,
+			lname, lname, t.Alias,
+			lname, lname, t.Alias,
+			lname, lname, t.Alias,
+			lname, lname, t.Alias))
 	}
 
 	b.WriteString("}\n")
@@ -818,6 +958,10 @@ func toPascal(s string) string {
 	result := strings.Join(parts, "")
 	if len(result) > 0 {
 		result = strings.ToUpper(result[:1]) + result[1:]
+		// Prefix with _ if starts with digit
+		if result[0] >= '0' && result[0] <= '9' {
+			result = "_" + result
+		}
 	}
 	return result
 }

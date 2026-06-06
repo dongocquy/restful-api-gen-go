@@ -9,6 +9,8 @@
 /output/
 /generated/
 /tmp/
+restful-api-gen-go   # compiled binary (go build .)
+table.json           # cached DB schema (regenerate from DB)
 
 # Go
 vendor/

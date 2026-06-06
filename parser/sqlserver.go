@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 
@@ -95,7 +96,7 @@ func SaveToJSON(cfg *schema.ProjectConfig, path string) error {
 
 func buildConnStr(cfg schema.DBConfig) string {
 	return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=disable",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
+		cfg.User, url.QueryEscape(cfg.Password), cfg.Host, cfg.Port, cfg.Database)
 }
 
 func getTables(db *sql.DB, schemaName, database string) ([]string, error) {
@@ -298,48 +299,84 @@ func toPascalCase(s string) string {
 		if strings.HasSuffix(result, "s") && !strings.HasSuffix(result, "ss") {
 			result = strings.TrimSuffix(result, "s")
 		}
+		// Prefix with _ if starts with digit (invalid Go identifier)
+		if result[0] >= '0' && result[0] <= '9' {
+			result = "_" + result
+		}
 	}
 	return result
 }
 
 func sqlTypeToGoType(sqlType string, nullable string) string {
 	sqlType = strings.ToLower(sqlType)
-	isNull := nullable == "YES"
 
+	// NOTE: We always return POINTER types (*string, *int64, *float64, *bool, *time.Time)
+	// for all column types that could be NULL. This is because INFORMATION_SCHEMA
+	// sometimes reports IS_NULLABLE='NO' when the column actually contains NULL
+	// (e.g. after ALTER COLUMN, computed columns, etc.).
+	// Using pointers ensures sqlx.StructScan always succeeds even when
+	// actual data violates the schema metadata.
+	//
+	// Uniqueidentifier returns raw "string" because Go's sqlx can scan it
+	// even from NULL (it becomes ""), and GUIDs are almost never NULL.
+	// Binary/image return "[]byte" which is already nil-safe.
 	switch sqlType {
 	case "int", "integer":
-		if isNull { return "*int" }
-		return "int"
+		return "*int"
 	case "bigint":
-		if isNull { return "*int64" }
-		return "int64"
+		return "*int64"
 	case "smallint":
-		if isNull { return "*int16" }
-		return "int16"
+		return "*int16"
 	case "tinyint":
-		if isNull { return "*int8" }
-		return "int8"
+		return "*int8"
 	case "bit":
-		if isNull { return "*bool" }
-		return "bool"
+		return "*bool"
 	case "decimal", "numeric", "money", "smallmoney":
-		if isNull { return "*float64" }
-		return "float64"
+		return "*float64"
 	case "float", "real":
-		if isNull { return "*float64" }
-		return "float64"
+		return "*float64"
 	case "nvarchar", "varchar", "nchar", "char", "text", "ntext":
-		if isNull { return "*string" }
-		return "string"
+		return "*string"
 	case "datetime", "datetime2", "smalldatetime", "date", "time":
-		if isNull { return "*time.Time" }
-		return "time.Time"
+		return "*time.Time"
 	case "uniqueidentifier":
-		return "string"
+		return "*string"
 	case "varbinary", "binary", "image":
 		return "[]byte"
 	default:
-		return "string"
+		return "*string"
+	}
+}
+
+// goNullType returns the nullable Go pointer type for any database type.
+// Use this in repository scanning to always use sql.NullXxx via pointers,
+// preventing scan failures when actual data contains NULL despite
+// IS_NULLABLE='NO' in the schema.
+func goNullType(sqlType string) string {
+	sqlType = strings.ToLower(sqlType)
+	switch sqlType {
+	case "int", "integer":
+		return "*int"
+	case "bigint":
+		return "*int64"
+	case "smallint":
+		return "*int16"
+	case "tinyint":
+		return "*int8"
+	case "bit":
+		return "*bool"
+	case "decimal", "numeric", "money", "smallmoney", "float", "real":
+		return "*float64"
+	case "nvarchar", "varchar", "nchar", "char", "text", "ntext":
+		return "*string"
+	case "datetime", "datetime2", "smalldatetime", "date", "time":
+		return "*time.Time"
+	case "uniqueidentifier":
+		return "*string"
+	case "varbinary", "binary", "image":
+		return "[]byte"
+	default:
+		return "*string"
 	}
 }
 
