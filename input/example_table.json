@@ -1,0 +1,146 @@
+{
+  "package_name": "api",
+  "module_path": "github.com/yourorg/your-api",
+  "api_version": "v1",
+  "framework": "gin",
+  "database": {
+    "type": "sqlserver"
+  },
+  "tables": [
+    {
+      "name": "users",
+      "alias": "User",
+      "primary_key": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "int",
+          "go_type": "int64",
+          "is_auto_increment": true,
+          "is_primary_key": true,
+          "description": "Primary key"
+        },
+        {
+          "name": "name",
+          "type": "nvarchar",
+          "go_type": "string",
+          "max_length": 100,
+          "description": "Full name"
+        },
+        {
+          "name": "email",
+          "type": "nvarchar",
+          "go_type": "string",
+          "max_length": 255,
+          "unique": true,
+          "description": "Email address"
+        },
+        {
+          "name": "password_hash",
+          "type": "nvarchar",
+          "go_type": "string",
+          "max_length": 255,
+          "description": "bcrypt hash"
+        },
+        {
+          "name": "status",
+          "type": "nvarchar",
+          "go_type": "string",
+          "max_length": 20,
+          "default_value": "'active'",
+          "description": "active, inactive, suspended"
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "go_type": "time.Time",
+          "description": "Record created"
+        },
+        {
+          "name": "updated_at",
+          "type": "datetime",
+          "go_type": "*time.Time",
+          "nullable": true,
+          "description": "Record updated"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_users_email",
+          "columns": [
+            "email"
+          ],
+          "unique": true
+        },
+        {
+          "name": "idx_users_status",
+          "columns": [
+            "status"
+          ]
+        }
+      ],
+      "relations": [
+        {
+          "type": "has_many",
+          "table": "orders",
+          "foreign_key": "user_id",
+          "reference": "id"
+        }
+      ],
+      "timestamps": true
+    },
+    {
+      "name": "orders",
+      "alias": "Order",
+      "primary_key": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "int",
+          "go_type": "int64",
+          "is_auto_increment": true,
+          "is_primary_key": true
+        },
+        {
+          "name": "user_id",
+          "type": "int",
+          "go_type": "int64",
+          "description": "FK to users"
+        },
+        {
+          "name": "total_amount",
+          "type": "decimal",
+          "go_type": "float64",
+          "description": "Order total"
+        },
+        {
+          "name": "status",
+          "type": "nvarchar",
+          "go_type": "string",
+          "max_length": 20,
+          "default_value": "'pending'"
+        },
+        {
+          "name": "created_at",
+          "type": "datetime",
+          "go_type": "time.Time"
+        },
+        {
+          "name": "updated_at",
+          "type": "datetime",
+          "go_type": "*time.Time",
+          "nullable": true
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_orders_user",
+          "columns": [
+            "user_id"
+          ]
+        }
+      ],
+      "timestamps": true
+    }
+  ]
+}
