@@ -1,38 +1,38 @@
 # restful-api-gen-go 🚀
 
-**Tự động sinh RESTful API + OpenAPI spec từ SQL Server schema hoặc file `table.json`**
+**Auto-generate RESTful APIs + OpenAPI spec from SQL Server schema or a `table.json` file.**
 
-Define schema **1 lần** → system tự sinh **toàn bộ** endpoint RESTful + OpenAPI spec. Không cần code từng endpoint.
+Define your schema **once** — the system generates every REST endpoint and an OpenAPI 3.0.3 spec automatically. No hand-coding individual endpoints.
 
 ---
 
-## 🌟 Tính năng
+## 🌟 Features
 
-- **Tự động gen** Model → Repository → Service → Handler → Router
-- **OpenAPI 3.0.3 spec** — tương thích Swagger UI / Redoc / Postman
-- **SQL Server native** — OFFSET/FETCH pagination, SCOPE_IDENTITY, soft delete
-- **Gin framework** — handlers ready-to-use
-- **3 modes**: từ `table.json`, từ SQL Server trực tiếp, hoặc tạo mẫu
+- **Full-stack code generation** — Model → Repository → Service → Handler → Router
+- **OpenAPI 3.0.3 spec** — compatible with Swagger UI, Redoc, Postman
+- **SQL Server native** — OFFSET/FETCH pagination, SCOPE_IDENTITY, soft delete support
+- **Gin framework** — ready-to-use HTTP handlers
+- **3 modes**: from `table.json`, direct from SQL Server, or generate a sample
 
-## 📦 Output
+## 📦 Output per schema
 
-| File | Layer | Mô tả |
-|------|-------|-------|
-| `model.go` | Model | Go struct + `json`/`db` tags |
+| File | Layer | Description |
+|------|-------|-------------|
+| `model.go` | Model | Go struct with `json`/`db` tags |
 | `repository.go` | Repository | CRUD: GetAll, GetByID, Create, Update, Delete |
-| `service.go` | Service | Business logic + pagination + auto timestamp |
+| `service.go` | Service | Business logic + pagination + auto timestamps |
 | `handler.go` | Handler | Gin HTTP handlers |
 | `router.go` | Router | `SetupRoutes(router, db)` |
-| `openapi.yaml` | OpenAPI | OpenAPI 3.0.3 spec đầy đủ paths + schemas |
+| `openapi.yaml` | OpenAPI | Full OpenAPI 3.0.3 spec |
 
-### Endpoints tự động
+### Generated endpoints
 
 ```
 GET    /api/v1/{table}          # List (page, page_size)
 GET    /api/v1/{table}/:id      # Get by ID
 POST   /api/v1/{table}          # Create
 PUT    /api/v1/{table}/:id      # Update
-DELETE /api/v1/{table}/:id      # Delete (soft delete nếu có deleted_at)
+DELETE /api/v1/{table}/:id      # Delete (soft-delete if deleted_at column exists)
 ```
 
 ---
@@ -47,21 +47,21 @@ cd restful-api-gen-go
 go build ./...
 ```
 
-### 2. Tạo sample `table.json`
+### 2. Generate a sample `table.json`
 
 ```bash
 go run main.go -mode sample -json my_schema.json
 ```
 
-Sửa file `my_schema.json` với schema thật.
+Edit `my_schema.json` with your actual schema.
 
-### 3. Gen code
+### 3. Generate code from the JSON file
 
 ```bash
 go run main.go -mode from-json -json my_schema.json -output ./generated
 ```
 
-Kết quả:
+Result:
 
 ```
 ./generated/
@@ -74,7 +74,7 @@ Kết quả:
 └── openapi.yaml
 ```
 
-### 4. Gen trực tiếp từ SQL Server
+### 4. Generate directly from a live SQL Server
 
 ```bash
 go run main.go -mode from-db \
@@ -87,11 +87,11 @@ go run main.go -mode from-db \
   -output ./generated
 ```
 
-→ Tự động đọc schema → tạo `table.json` → gen code.
+→ Automatically reads the schema, produces `table.json`, then generates all code.
 
 ---
 
-## 📐 Format `table.json`
+## 📐 `table.json` Format
 
 ```json
 {
@@ -137,29 +137,29 @@ go run main.go -mode from-db \
 
 ---
 
-## 🔧 Yêu cầu
+## 🔧 Requirements
 
 - Go 1.22+
-- SQL Server driver (cho `from-db` mode)
+- SQL Server driver (only needed for `from-db` mode)
 
 ---
 
 ## 📄 OpenAPI
 
-File `openapi.yaml` được gen tự động, tương thích:
+The `openapi.yaml` file is generated automatically and works with:
 
-- **Swagger UI** — import trực tiếp
+- **Swagger UI** — import directly
 - **Redoc** — `npx redoc-cli bundle openapi.yaml`
 - **Postman** — Import → OpenAPI
-- **Stoplight** — import spec
+- **Stoplight** — import the spec
 
 ### View locally
 
 ```bash
-# Dùng redoc
+# Using redoc
 npx redoc-cli serve output/openapi.yaml
 
-# Hoặc Swagger UI Docker
+# Or via Swagger UI in Docker
 docker run -p 8081:8080 -v $(pwd)/output:/spec swaggerapi/swagger-ui
 ```
 
@@ -169,14 +169,14 @@ docker run -p 8081:8080 -v $(pwd)/output:/spec swaggerapi/swagger-ui
 
 ```
 table.json ──► Generator ──► model.go
-  (hoặc)                      ├── repository.go
+  (or)                        ├── repository.go
                               ├── service.go
                               ├── handler.go
                               ├── router.go
                               └── openapi.yaml
 ```
 
-**Pattern:** Go code generator sử dụng `fmt.Sprintf` + string building (không text/template) để sinh code Go sạch, đúng format, compile ngay.
+**Pattern:** A Go code generator that uses `fmt.Sprintf` + string building (not text/template) to emit clean, properly formatted Go code that compiles immediately.
 
 ---
 
