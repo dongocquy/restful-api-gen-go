@@ -53,6 +53,125 @@ func Generate(cfg *schema.ProjectConfig, outputDir string) error {
 	return nil
 }
 
+// GenerateFull generates code + main.go for a self-contained runnable API server
+func GenerateFull(cfg *schema.ProjectConfig, outputDir, serverPort string) error {
+	// 1. Generate Go code into package subdirectory
+	if err := Generate(cfg, outputDir); err != nil {
+		return err
+	}
+	pkgDir := filepath.Join(outputDir, cfg.PackageName)
+
+	// 2. Generate go.mod at the output root (so main.go can import the package)
+	rootDir := outputDir
+	if err := generateGoMod(cfg.ModulePath, rootDir); err != nil {
+		return err
+	}
+
+	// 3. Generate main.go at root level
+	return generateMain(cfg, rootDir, pkgDir, serverPort)
+}
+
+func generateGoMod(modulePath, outputRoot string) error {
+	goModPath := filepath.Join(outputRoot, "go.mod")
+	if _, err := os.Stat(goModPath); err == nil {
+		return nil
+	}
+
+	content := fmt.Sprintf(`module %s
+
+go 1.22
+
+require (
+	github.com/gin-gonic/gin v1.9.1
+	github.com/jmoiron/sqlx v1.3.5
+	github.com/denisenkom/go-mssqldb v0.12.3
+)
+`, modulePath)
+
+	return os.WriteFile(goModPath, []byte(content), 0644)
+}
+
+func generateMain(cfg *schema.ProjectConfig, rootDir, pkgDir, port string) error {
+	if port == "" {
+		port = "8080"
+	}
+
+	connStr := buildConnStr(cfg.Database)
+	importPath := cfg.ModulePath + "/" + cfg.PackageName
+
+	mainContent := fmt.Sprintf(`package main
+
+import (
+	"log"
+	"os"
+
+	"github.com/gin-gonic/gin"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/denisenkom/go-mssqldb"
+
+	"%s"
+)
+
+func main() {
+	// Database connection
+	connStr := os.Getenv("DB_CONN_STR")
+	if connStr == "" {
+		connStr = %q
+	}
+
+	db, err := sqlx.Connect("sqlserver", connStr)
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %%v", err)
+	}
+	defer db.Close()
+
+	log.Println("Connected to SQL Server")
+
+	// Gin router
+	r := gin.Default()
+
+	// Register all generated routes
+	%s.SetupRoutes(r, db)
+
+	// Start server
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = %q
+	}
+
+	log.Printf("Server starting on :%%s", port)
+	if err := r.Run(":" + port); err != nil {
+		log.Fatalf("Failed to start server: %%v", err)
+	}
+}
+`, importPath, connStr, cfg.PackageName, port)
+
+	path := filepath.Join(rootDir, "main.go")
+	if err := os.WriteFile(path, []byte(mainContent), 0644); err != nil {
+		return fmt.Errorf("write main.go: %w", err)
+	}
+	fmt.Printf("  ✓ Generated: main.go (server on :%s)\n", port)
+	return nil
+}
+
+func buildConnStr(db schema.DBConfig) string {
+	if db.ConnStr != "" {
+		return db.ConnStr
+	}
+	user := db.User
+	pass := db.Password
+	host := db.Host
+	if host == "" {
+		host = "localhost"
+	}
+	port := db.Port
+	if port == 0 {
+		port = 1433
+	}
+	dbName := db.Database
+	return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=disable", user, pass, host, port, dbName)
+}
+
 // --- Model (template-based) ---
 
 func generateModel(cfg *schema.ProjectConfig, pkgDir string) error {
